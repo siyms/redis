@@ -5,7 +5,7 @@ proc log_file_matches {log pattern} {
     string match $pattern $content
 }
 
-start_server {tags {"repl"}} {
+start_server {tags {"repl network"}} {
     set slave [srv 0 client]
     set slave_host [srv 0 host]
     set slave_port [srv 0 port]
@@ -75,6 +75,27 @@ start_server {tags {"repl"}} {
             r incrbyfloat test 0.1
             after 1000
             assert_equal [$A debug digest] [$B debug digest]
+        }
+
+        test {GETSET replication} {
+            $A config resetstat
+            $A config set loglevel debug
+            $B config set loglevel debug
+            r set test foo
+            assert_equal [r getset test bar] foo
+            wait_for_condition 500 10 {
+                [$A get test] eq "bar"
+            } else {
+                fail "getset wasn't propagated"
+            }
+            assert_equal [r set test vaz get] bar
+            wait_for_condition 500 10 {
+                [$A get test] eq "vaz"
+            } else {
+                fail "set get wasn't propagated"
+            }
+            assert_match {*calls=3,*} [cmdrstat set $A]
+            assert_match {} [cmdrstat getset $A]
         }
 
         test {BRPOPLPUSH replication, when blocking against empty list} {
@@ -175,9 +196,11 @@ start_server {tags {"repl"}} {
         } {master}
 
         test {SLAVEOF should start with link status "down"} {
+            r multi
             r slaveof [srv -1 host] [srv -1 port]
-            s master_link_status
-        } {down}
+            r info replication
+            r exec
+        } {*master_link_status:down*}
 
         test {The role should immediately be changed to "replica"} {
             s role
@@ -655,11 +678,11 @@ start_server {tags {"repl"}} {
                             puts "master utime: $master_utime"
                             puts "master stime: $master_stime"
                         }
-                        if {$all_drop == "all" || $all_drop == "slow"} {
+                        if {!$::no_latency && ($all_drop == "all" || $all_drop == "slow")} {
                             assert {$master_utime < 70}
                             assert {$master_stime < 70}
                         }
-                        if {$all_drop == "none" || $all_drop == "fast"} {
+                        if {!$::no_latency && ($all_drop == "none" || $all_drop == "fast")} {
                             assert {$master_utime < 15}
                             assert {$master_stime < 15}
                         }
@@ -699,7 +722,7 @@ start_server {tags {"repl"}} {
 test "diskless replication child being killed is collected" {
     # when diskless master is waiting for the replica to become writable
     # it removes the read event from the rdb pipe so if the child gets killed
-    # the replica will hung. and the master may not collect the pid with wait3
+    # the replica will hung. and the master may not collect the pid with waitpid
     start_server {tags {"repl"}} {
         set master [srv 0 client]
         set master_host [srv 0 host]
@@ -725,7 +748,6 @@ test "diskless replication child being killed is collected" {
 
             # simulate the OOM killer or anyone else kills the child
             set fork_child_pid [get_child_pid -1]
-            puts "fork child is $fork_child_pid"
             exec kill -9 $fork_child_pid
 
             # wait for the parent to notice the child have exited
@@ -812,7 +834,9 @@ test {Kill rdb child process if its dumping RDB is not useful} {
 
                 # Wait for starting child
                 wait_for_condition 50 100 {
-                    [s 0 rdb_bgsave_in_progress] == 1
+                    ([s 0 rdb_bgsave_in_progress] == 1) &&
+                    ([string match "*wait_bgsave*" [s 0 slave0]]) &&
+                    ([string match "*wait_bgsave*" [s 0 slave1]])
                 } else {
                     fail "rdb child didn't start"
                 }
@@ -837,7 +861,9 @@ test {Kill rdb child process if its dumping RDB is not useful} {
                 $slave1 slaveof $master_host $master_port
                 $slave2 slaveof $master_host $master_port
                 wait_for_condition 50 100 {
-                    [s 0 rdb_bgsave_in_progress] == 1
+                    ([s 0 rdb_bgsave_in_progress] == 1) &&
+                    ([string match "*wait_bgsave*" [s 0 slave0]]) &&
+                    ([string match "*wait_bgsave*" [s 0 slave1]])
                 } else {
                     fail "rdb child didn't start"
                 }
